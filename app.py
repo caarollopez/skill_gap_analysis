@@ -8,6 +8,16 @@ import plotly.graph_objects as go
 from core.api_client import load_or_fetch_jobs
 from core.skills_extraction import clean_html, extract_skills, skills_list, detect_seniority, get_best_apply_link
 from core.analysis import compute_skill_gap, cluster_jobs, interpret_clusters
+from core.graph_analysis import (
+    build_skill_cooccurrence_graph,
+    compute_centralities,
+    detect_communities,
+    find_bridge_skills,
+    plot_skill_network,
+    get_skill_recommendations,
+    get_skill_importance_scores,
+    get_skill_paths
+)
 
 # Setup logging
 logging.basicConfig(
@@ -419,8 +429,13 @@ if 'df' in st.session_state and not st.session_state.df.empty:
     missing = st.session_state.missing
     all_skills_flat = st.session_state.all_skills_flat
     
+    st.sidebar.divider()
+    st.sidebar.header("Advanced Analysis")
+    enable_graph_analysis = st.sidebar.checkbox("Enable Graph Analysis", value=False)
+    show_network_viz = st.sidebar.checkbox("Show Network Visualization", value=True) if enable_graph_analysis else False
+    
     # Create tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["Overview", "Skills Analysis", "Job Matches", "Recommendations"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Overview", "Skills Analysis", "Job Matches", "Recommendations", "Graph Analysis"])
     
     with tab1:
         st.header("Overview Dashboard")
@@ -843,6 +858,170 @@ if 'df' in st.session_state and not st.session_state.df.empty:
             - Focus on roles matching your seniority level
             - Consider remote opportunities to expand options
             """)
+
+    with tab5:
+        if enable_graph_analysis:
+            st.header("Skill Network Analysis")
+            
+            try:
+                G = build_skill_cooccurrence_graph(df)
+                
+                if len(G.nodes()) > 0:
+                    centrality_df = compute_centralities(G)
+                    
+                    st.sidebar.subheader("Community Detection Settings")
+                    comm_algorithm = st.sidebar.selectbox(
+                        "Algorithm",
+                        options=["best", "louvain", "greedy_modularity", "label_propagation"],
+                        index=0,
+                        help="'best' tries all algorithms and picks the one with highest modularity"
+                    )
+                    comm_resolution = st.sidebar.slider(
+                        "Resolution",
+                        min_value=0.1,
+                        max_value=2.0,
+                        value=1.0,
+                        step=0.1,
+                        help="Higher values create more, smaller communities (Louvain only)"
+                    )
+                    min_comm_size = st.sidebar.slider(
+                        "Min Community Size",
+                        min_value=1,
+                        max_value=5,
+                        value=2,
+                        help="Merge communities smaller than this size"
+                    )
+                    
+                    communities = detect_communities(G, algorithm=comm_algorithm, 
+                                                    resolution=comm_resolution,
+                                                    min_community_size=min_comm_size)
+                    bridge_skills_list = find_bridge_skills(G, top_n=10)
+                    importance_df = get_skill_importance_scores(df, all_user_skills)
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Total Skills", len(G.nodes()))
+                    with col2:
+                        st.metric("Skill Connections", G.number_of_edges())
+                    with col3:
+                        st.metric("Communities", len(set(communities.values())) if communities else 0)
+                    with col4:
+                        avg_importance = importance_df["importance_score"].mean() if not importance_df.empty else 0
+                        st.metric("Avg Importance", f"{avg_importance:.2f}")
+                    
+                    st.divider()
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.subheader("Top Skills by Importance Score")
+                        st.caption("Combines frequency, centrality, and network position")
+                        if not importance_df.empty:
+                            top_importance = importance_df[["skill", "importance_score", "frequency", "degree", "betweenness"]].head(15)
+                            top_importance.columns = ["Skill", "Importance", "Frequency", "Degree", "Betweenness"]
+                            top_importance["Importance"] = top_importance["Importance"].apply(lambda x: f"{x:.3f}")
+                            top_importance["Degree"] = top_importance["Degree"].apply(lambda x: f"{x:.3f}")
+                            top_importance["Betweenness"] = top_importance["Betweenness"].apply(lambda x: f"{x:.3f}")
+                            st.dataframe(top_importance, use_container_width=True, hide_index=True)
+                        else:
+                            st.info("No importance scores available")
+                    
+                    with col2:
+                        st.subheader("Bridge Skills")
+                        st.caption("Skills that connect different communities (high betweenness)")
+                        if bridge_skills_list:
+                            bridge_df = pd.DataFrame({
+                                "Skill": bridge_skills_list,
+                                "Rank": range(1, len(bridge_skills_list) + 1)
+                            })
+                            st.dataframe(bridge_df, use_container_width=True, hide_index=True)
+                        else:
+                            st.info("No bridge skills detected")
+                    
+                    st.divider()
+                    
+                    if communities:
+                        st.subheader("Skill Communities")
+                        community_counts = Counter(communities.values())
+                        comm_df = pd.DataFrame([
+                            {
+                                "Community": f"Community {comm_id}",
+                                "Skills Count": count,
+                                "Top Skills": ", ".join([skill for skill, cid in communities.items() if cid == comm_id][:8])
+                            }
+                            for comm_id, count in community_counts.most_common()
+                        ])
+                        st.dataframe(comm_df, use_container_width=True, hide_index=True)
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.subheader("Community Sizes")
+                            comm_size_data = [
+                                {"Community": f"Community {comm_id}", "Size": count}
+                                for comm_id, count in sorted(community_counts.items())
+                            ]
+                            comm_size_df = pd.DataFrame(comm_size_data)
+                            fig_comm = px.bar(
+                                comm_size_df,
+                                x="Community",
+                                y="Size",
+                                labels={"Size": "Number of Skills", "Community": "Community"},
+                                title="Skills per Community",
+                                color="Size",
+                                color_continuous_scale="Viridis"
+                            )
+                            fig_comm.update_layout(
+                                height=300,
+                                plot_bgcolor="rgba(0,0,0,0)",
+                                paper_bgcolor="rgba(0,0,0,0)",
+                                font=dict(color="#e0e0e0"),
+                                title_font=dict(color="#b8e994", size=16),
+                                xaxis=dict(tickangle=-45)
+                            )
+                            st.plotly_chart(fig_comm, use_container_width=True)
+                        
+                        with col2:
+                            st.subheader("Top Skills by Centrality")
+                            top_centrality = centrality_df[["node", "degree", "betweenness", "weighted_degree"]].head(10)
+                            top_centrality.columns = ["Skill", "Degree", "Betweenness", "Weighted Degree"]
+                            top_centrality["Degree"] = top_centrality["Degree"].apply(lambda x: f"{x:.3f}")
+                            top_centrality["Betweenness"] = top_centrality["Betweenness"].apply(lambda x: f"{x:.3f}")
+                            st.dataframe(top_centrality, use_container_width=True, hide_index=True)
+                    
+                    if show_network_viz:
+                        st.divider()
+                        st.subheader("Interactive Network Graph")
+                        net = plot_skill_network(G, communities, bridge_skills_list[:10])
+                        if net:
+                            try:
+                                net.save_graph("network.html")
+                                with open("network.html", "r", encoding="utf-8") as f:
+                                    html_content = f.read()
+                                st.components.v1.html(html_content, height=700)
+                            except Exception as e:
+                                st.error(f"Error displaying network: {e}")
+                        else:
+                            st.warning("Could not generate network visualization")
+                    
+                    if all_user_skills:
+                        st.divider()
+                        st.subheader("Network-Based Skill Recommendations")
+                        recommendations = get_skill_recommendations(G, all_user_skills, top_n=10)
+                        if not recommendations.empty:
+                            recommendations.columns = ["Recommended Skill", "Score", "Reason"]
+                            recommendations["Score"] = recommendations["Score"].apply(lambda x: f"{x:.3f}")
+                            st.dataframe(recommendations, use_container_width=True, hide_index=True)
+                        else:
+                            st.info("No recommendations available based on network analysis")
+                
+                else:
+                    st.info("Not enough skills data for network analysis")
+                    
+            except Exception as e:
+                st.error(f"Error in graph analysis: {e}")
+                logger.exception("Graph analysis error")
+        else:
+            st.info("💡 Enable 'Graph Analysis' in the sidebar to see skill network insights and visualizations.")
 
 else:
     # Welcome screen
