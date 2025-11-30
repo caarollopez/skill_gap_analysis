@@ -59,16 +59,62 @@ python -m spacy download xx_ent_wiki_sm
 ## 🛠️ Tools & Technologies  
 - **JSearch / OpenWebNinja** — Job data extraction  
 - **Python** — Data cleaning, structuring, and analysis  
-- **Looker Studio (Google Data Studio)** — Dashboard visualization  
-- **GitHub** — Project organization & version control
+- **Streamlit** — Interactive dashboard  
+- **spaCy** — NLP for skill extraction  
+- **NetworkX** — Graph analysis and network science  
+- **Plotly** — Interactive visualizations  
+- **scikit-learn** — Clustering algorithms
 
-## CLI Prototype (rule_based_matching.py)
+## 🚀 Features
 
-We implemented a first CLI prototype (`rule_based_matching.py`) that:
-- Asks for role, location and basic filters (remote, employment type, etc.)
-- Fetches job postings from JSearch (with simple caching in `data/`)
-- Cleans descriptions and performs rule-based skill extraction with spaCy
-- Saves a processed CSV for later dashboarding
+### Core Functionality
+- **Job Search**: Fetch job postings from JSearch API with caching
+- **Skill Extraction**: NLP-based extraction using spaCy with synonym matching
+- **Skill Gap Analysis**: Calculate match ratios and identify missing skills
+- **Seniority Detection**: Automatic detection of job level (junior/mid/senior)
+
+### Advanced Analytics
+- **Graph Analysis**: Skill co-occurrence networks with NetworkX
+- **Community Detection**: Identify skill communities using Louvain algorithm
+- **Centrality Metrics**: Degree, betweenness, closeness, eigenvector centralities
+- **Job Clustering**: K-means clustering to identify job typologies
+- **Interactive Visualizations**: Network graphs, radar charts, bar plots
+
+### Dashboard Features
+- Interactive filters (role, location, remote, seniority, match ratio)
+- Real-time skill gap calculation
+- Network visualization of skill relationships
+- Cluster analysis of job offers
+- Profile comparison (user vs. ideal profile)
+
+## 📊 Project Structure
+
+```
+skill_gap_analysis/
+├── app.py                    # Streamlit dashboard
+├── core/
+│   ├── api_client.py        # API client with caching
+│   ├── skills_extraction.py # NLP skill extraction
+│   ├── analysis.py          # Skill gap & clustering
+│   ├── graph_analysis.py    # Network analysis
+│   └── config.py            # Configuration
+├── data/
+│   ├── taxonomy_skills.csv   # Skill taxonomy with synonyms
+│   └── processed_jobs_*.csv # Processed job data
+├── notebooks/
+│   └── graph_exploration.ipynb # Exploration notebook
+├── docs/
+│   └── STATE_OF_THE_ART.md  # State-of-the-art analysis
+└── requirements.txt         # Dependencies
+```
+
+## 📚 Documentation
+
+See [docs/STATE_OF_THE_ART.md](docs/STATE_OF_THE_ART.md) for a comprehensive analysis of:
+- Existing solutions (LinkedIn, Jobscan, Coursera, etc.)
+- Analytical techniques used
+- Project limitations
+- Future work
 
   
 ## 👥 Authors  

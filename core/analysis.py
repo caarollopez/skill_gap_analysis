@@ -1,16 +1,67 @@
 from collections import Counter
 import pandas as pd
+import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 
-def compute_skill_gap(rows, user_skills):
-    user_skills = set(user_skills)
+def compute_skill_gap(rows, user_skills, skill_levels=None):
+    """
+    Compute skill gap considering user skills and optionally their levels.
+    
+    Args:
+        rows: List of job dictionaries with 'skills_detected' key
+        user_skills: Set or list of skills the user has
+        skill_levels: Dict mapping skill -> level (1-4: Beginner to Expert)
+    
+    Returns:
+        Tuple of (rows with match metrics, missing skills list)
+    """
+    user_skills = set(user_skills) if user_skills else set()
+    skill_levels = skill_levels or {}
+    
+    # Default level is 2 (Intermediate) if skill is present but no level specified
+    default_level = 2
 
     for row in rows:
         job_sk = set(row["skills_detected"])
         row["n_skills_job"] = len(job_sk)
+        
+        # Count skills user has (binary)
         row["n_skills_user_has"] = len(job_sk & user_skills)
+        
+        # Calculate weighted match considering skill levels
+        # Skills with higher levels contribute more to the match
+        weighted_match = 0.0
+        total_weight = 0.0
+        
+        for skill in job_sk:
+            if skill in user_skills:
+                # User has the skill - weight by level (1-4, normalized to 0.25-1.0)
+                user_level = skill_levels.get(skill, default_level)
+                weight = user_level / 4.0  # Normalize to 0.25-1.0
+                weighted_match += weight
+                total_weight += 1.0
+            else:
+                # User doesn't have the skill
+                total_weight += 1.0
+        
+        # Match ratio: binary (original)
         row["match_ratio"] = (
             row["n_skills_user_has"] / row["n_skills_job"]
             if row["n_skills_job"] > 0 else 0
+        )
+        
+        # Weighted match ratio: considers skill levels
+        row["weighted_match_ratio"] = (
+            weighted_match / total_weight if total_weight > 0 else 0
+        )
+        
+        # Average level of matched skills
+        matched_levels = [skill_levels.get(skill, default_level) 
+                         for skill in job_sk if skill in user_skills]
+        row["avg_skill_level"] = (
+            sum(matched_levels) / len(matched_levels) 
+            if matched_levels else 0
         )
 
     all_skills = []
@@ -30,3 +81,111 @@ def compute_skill_gap(rows, user_skills):
     ]
 
     return rows, missing
+
+
+def cluster_jobs(jobs_df: pd.DataFrame, n_clusters: int = 4, random_state: int = 42) -> pd.DataFrame:
+    """
+    Cluster jobs based on their skill vectors using k-means.
+    
+    Args:
+        jobs_df: DataFrame with 'job_id' and 'skills_detected' columns
+        n_clusters: Number of clusters (default: 4)
+        random_state: Random seed for reproducibility
+        
+    Returns:
+        DataFrame with added 'cluster' column
+    """
+    if len(jobs_df) < n_clusters:
+        # Not enough jobs for clustering
+        jobs_df = jobs_df.copy()
+        jobs_df["cluster"] = 0
+        return jobs_df
+    
+    # Get all unique skills
+    all_skills = set()
+    for skills in jobs_df["skills_detected"]:
+        if isinstance(skills, list):
+            all_skills.update(skills)
+        elif isinstance(skills, str):
+            all_skills.update([s.strip() for s in skills.split(",") if s.strip()])
+    
+    all_skills = sorted(list(all_skills))
+    
+    if len(all_skills) == 0:
+        # No skills found
+        jobs_df = jobs_df.copy()
+        jobs_df["cluster"] = 0
+        return jobs_df
+    
+    # Create binary matrix: jobs × skills
+    matrix = []
+    job_ids = []
+    
+    for _, row in jobs_df.iterrows():
+        job_id = row.get("job_id", "")
+        skills = row.get("skills_detected", [])
+        
+        if isinstance(skills, str):
+            skills = [s.strip() for s in skills.split(",") if s.strip()]
+        elif not isinstance(skills, list):
+            skills = []
+        
+        skill_set = set(skills)
+        vector = [1 if skill in skill_set else 0 for skill in all_skills]
+        matrix.append(vector)
+        job_ids.append(job_id)
+    
+    matrix = np.array(matrix)
+    
+    # Apply k-means
+    if matrix.shape[1] > 0:
+        # Standardize features (optional, but can help)
+        scaler = StandardScaler()
+        matrix_scaled = scaler.fit_transform(matrix)
+        
+        kmeans = KMeans(n_clusters=min(n_clusters, len(jobs_df)), random_state=random_state, n_init=10)
+        clusters = kmeans.fit_predict(matrix_scaled)
+    else:
+        clusters = np.zeros(len(jobs_df), dtype=int)
+    
+    # Add cluster column
+    result_df = jobs_df.copy()
+    result_df["cluster"] = clusters
+    
+    return result_df
+
+
+def interpret_clusters(jobs_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Interpret clusters by finding most common skills in each cluster.
+    
+    Args:
+        jobs_df: DataFrame with 'cluster' and 'skills_detected' columns
+        
+    Returns:
+        DataFrame with cluster interpretations
+    """
+    cluster_summaries = []
+    
+    for cluster_id in sorted(jobs_df["cluster"].unique()):
+        cluster_jobs = jobs_df[jobs_df["cluster"] == cluster_id]
+        
+        # Count skills in this cluster
+        all_skills = []
+        for skills in cluster_jobs["skills_detected"]:
+            if isinstance(skills, list):
+                all_skills.extend(skills)
+            elif isinstance(skills, str):
+                all_skills.extend([s.strip() for s in skills.split(",") if s.strip()])
+        
+        skill_freq = Counter(all_skills)
+        top_skills = [skill for skill, _ in skill_freq.most_common(5)]
+        
+        cluster_summaries.append({
+            "cluster": cluster_id,
+            "num_jobs": len(cluster_jobs),
+            "top_skills": ", ".join(top_skills),
+            "avg_match_ratio": cluster_jobs["match_ratio"].mean() if "match_ratio" in cluster_jobs.columns else 0
+        })
+    
+    return pd.DataFrame(cluster_summaries)
