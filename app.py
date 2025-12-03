@@ -1,13 +1,20 @@
 import logging
-import streamlit as st
-import pandas as pd
 from collections import Counter
+
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import streamlit as st
+import networkx as nx
+
+try:
+    import PyPDF2
+except ImportError:  # pragma: no cover - handled at runtime in UI
+    PyPDF2 = None
 
 from core.api_client import load_or_fetch_jobs
-from core.skills_extraction import clean_html, extract_skills, skills_list, detect_seniority, get_best_apply_link
-from core.analysis import compute_skill_gap, cluster_jobs, interpret_clusters
+from core.skills_extraction import clean_html, extract_skills, extract_custom_skills, skills_list, detect_seniority, get_best_apply_link
+from core.analysis import compute_skill_gap, cluster_jobs, interpret_clusters, cluster_skills_dynamic
 from core.graph_analysis import (
     build_skill_cooccurrence_graph,
     compute_centralities,
@@ -25,6 +32,49 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def render_skill_levels_ui(all_user_skills, skill_levels, key_suffix=""):
+    """
+    Render the skill levels UI in the sidebar.
+    
+    Args:
+        all_user_skills: List of user skills
+        skill_levels: Dictionary to store skill levels
+        key_suffix: Optional suffix to add to widget keys for uniqueness
+    """
+    if not all_user_skills:
+        return skill_levels
+    
+    st.sidebar.divider()
+    st.sidebar.subheader("Skill Levels (Optional)")
+    st.sidebar.caption("Set your proficiency level for each skill. Default: Expert if not specified.")
+    
+    # Level options
+    level_options = ["Basic", "Intermediate", "Advanced", "Expert"]
+    
+    # Use expander to keep sidebar clean
+    with st.sidebar.expander("Set Skill Levels", expanded=False):
+        for skill in all_user_skills:
+            # Session state key (shared across renders)
+            session_key = f"skill_level_{skill}"
+            # Widget key (unique per render location)
+            widget_key = f"skill_level_{skill}{key_suffix}"
+            
+            if session_key not in st.session_state:
+                st.session_state[session_key] = "Expert"
+            
+            selected_level = st.selectbox(
+                f"{skill}",
+                options=level_options,
+                index=level_options.index(st.session_state[session_key]),
+                key=widget_key,
+                help=f"Select your proficiency level for {skill}"
+            )
+            # Update session state
+            st.session_state[session_key] = selected_level
+            skill_levels[skill] = selected_level
+    
+    return skill_levels
 
 # Page config with modern styling
 st.set_page_config(
@@ -253,6 +303,14 @@ role = st.sidebar.text_input("Role", value="", placeholder="e.g., data analyst, 
 location = st.sidebar.text_input("Location", "Madrid")
 country = st.sidebar.text_input("Country code", "es")
 
+# Quick UX hint for new users
+with st.sidebar.expander("Quick tips", expanded=False):
+    st.markdown(
+        "- **Step 1**: Enter a role and location\n"
+        "- **Step 2**: Add some of your skills\n"
+        "- **Step 3**: Click **Search Jobs** and explore the tabs"
+    )
+
 date_posted = st.sidebar.selectbox("Posted date", ["all", "today", "3days", "week", "month"])
 remote = st.sidebar.checkbox("Only remote?")
 work_from_home = True if remote else None
@@ -271,19 +329,41 @@ job_requirements = st.sidebar.multiselect(
 )
 job_requirements_str = ",".join(job_requirements) if job_requirements else None
 
-radius = st.sidebar.number_input("Radius (km)", min_value=0.0, value=0.0)
-radius_val = radius if radius > 0 else None
+# Interactive radius selection
+st.sidebar.subheader("Search Radius")
+radius_mode = st.sidebar.radio(
+    "How wide do you want to search?",
+    ["Only this city", "Up to 20 km", "Up to 50 km", "Custom"],
+    index=0,
+)
+
+if radius_mode == "Only this city":
+    radius_val = None  # API will use just the city
+elif radius_mode == "Up to 20 km":
+    radius_val = 20.0
+elif radius_mode == "Up to 50 km":
+    radius_val = 50.0
+else:
+    custom_radius = st.sidebar.slider(
+        "Custom radius (km)", min_value=0, max_value=200, value=20, step=5
+    )
+    radius_val = float(custom_radius) if custom_radius > 0 else None
+
+st.sidebar.caption(
+    "Tip: smaller radius focuses on your city; larger radius explores nearby cities "
+    "or relocation opportunities."
+)
 
 st.sidebar.header("Your Skills")
 st.sidebar.caption("Select skills from any category: technical, soft skills, languages, tools, etc.")
 user_skills = st.sidebar.multiselect("Select your skills", options=skills_list, help="Choose from technical skills, soft skills, languages, design tools, and more")
 
-# Custom skills input
-st.sidebar.subheader("Add Custom Skills")
+# Custom skills input (to allow any kind of skill)
+st.sidebar.subheader("Add Custom Skills (optional)")
 custom_skills_input = st.sidebar.text_input(
     "Enter custom skills (comma-separated)",
     placeholder="e.g., Customer Service, Sales, Photography",
-    help="Add skills that are not in the list above"
+    help="Add skills that are not in the list above",
 )
 
 # Parse custom skills
@@ -291,44 +371,106 @@ custom_skills = []
 if custom_skills_input:
     custom_skills = [s.strip() for s in custom_skills_input.split(",") if s.strip()]
 
-# Combine selected and custom skills
-all_user_skills = list(user_skills) + custom_skills
+# Optional CV upload to auto-detect skills
+st.sidebar.subheader("Or upload your CV (PDF)")
+cv_file = st.sidebar.file_uploader(
+    "Upload your CV (PDF only)",
+    type=["pdf"],
+    help="We will extract skills automatically from your CV using the same taxonomy.",
+)
 
-# Skill levels
-st.sidebar.subheader("Skill Levels")
-skill_levels = {}
-if all_user_skills:
-    st.sidebar.markdown("**Set your proficiency level for each skill:**")
-    level_options = {
-        "Beginner": 1,
-        "Intermediate": 2,
-        "Advanced": 3,
-        "Expert": 4
-    }
-    
-    for skill in all_user_skills:
-        level_label = st.sidebar.selectbox(
-            f"{skill}",
-            options=list(level_options.keys()),
-            index=1,  # Default to Intermediate
-            key=f"level_{skill}"
+cv_skills = []
+if cv_file is not None:
+    if PyPDF2 is None:
+        st.sidebar.error(
+            "PyPDF2 is not installed. Run `pip install PyPDF2` to enable CV parsing."
         )
-        skill_levels[skill] = level_options[level_label]
+    else:
+        try:
+            reader = PyPDF2.PdfReader(cv_file)
+            text_chunks = []
+            for page in reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text_chunks.append(page_text)
+            cv_text = "\n".join(text_chunks)
+            if cv_text.strip():
+                cv_skills = extract_skills(cv_text)
+                if cv_skills:
+                    st.sidebar.caption(
+                        f"Detected **{len(cv_skills)} skills** in your CV based on the taxonomy."
+                    )
+                    # Show a short preview so the user can decide what to add/adjust manually
+                    preview = ", ".join(sorted(cv_skills)[:10])
+                    st.sidebar.markdown(
+                        f"_Example skills from CV_: {preview}"
+                        + (" …" if len(cv_skills) > 10 else "")
+                    )
+                    with st.sidebar.expander("Show all detected CV skills", expanded=False):
+                        st.markdown(", ".join(sorted(cv_skills)))
+                    st.sidebar.caption(
+                        "You can complement or correct this list using the selector and custom skills above."
+                    )
+                else:
+                    st.sidebar.caption(
+                        "No skills from the taxonomy were detected in your CV text."
+                    )
+            else:
+                st.sidebar.caption("Could not read text from the uploaded PDF.")
+        except Exception as e:  # pragma: no cover - runtime only
+            st.sidebar.error(f"Error reading CV PDF: {e}")
+
+# Combine selected, custom and CV skills (unique)
+all_user_skills = sorted(set(list(user_skills) + custom_skills + cv_skills))
+
+if not all_user_skills:
+    st.sidebar.info(
+        "Add some skills above so the app can calculate your skill gap and "
+        "show personalized recommendations."
+    )
+
+# Skill levels selection (optional) - only show if no search results yet
+skill_levels = {}
+# Only show skill level UI before search if we don't have results yet
+if all_user_skills and 'df' not in st.session_state:
+    skill_levels = render_skill_levels_ui(all_user_skills, skill_levels, key_suffix="_pre")
 
 if st.sidebar.button("Search Jobs", type="primary", use_container_width=True):
+    # Reset pagination when starting a new search
+    st.session_state.job_matches_page = 1
+    
+    # Basic validation to avoid confusing empty searches
+    if not role.strip():
+        st.warning("Please enter at least a role before searching for jobs.")
+        st.stop()
+
+    if not location.strip():
+        st.warning("Please enter a location before searching for jobs.")
+        st.stop()
+
     with st.spinner("Fetching and analyzing jobs..."):
         try:
             data = load_or_fetch_jobs(
-                role, location, country,
+                role,
+                location,
+                country,
                 date_posted=date_posted,
                 work_from_home=work_from_home,
                 employment_types=employment_types_str,
                 job_requirements=job_requirements_str,
-                radius=radius_val
+                radius=radius_val,
             )
         except Exception as e:
-            logger.error(f"Error fetching jobs: {str(e)}")
-            st.error(f"Error fetching jobs: {str(e)}")
+            error_msg = str(e)
+            logger.error(f"Error fetching jobs: {error_msg}")
+            if "502" in error_msg:
+                st.error(
+                    "The external job API is temporarily unavailable (502 Bad Gateway). "
+                    "Please try again in a few minutes or adjust the search filters "
+                    "(role, location, radius)."
+                )
+            else:
+                st.error(f"Error fetching jobs from API: {error_msg}")
             st.stop()
 
         job_results = data.get("data", [])
@@ -341,6 +483,14 @@ if st.sidebar.button("Search Jobs", type="primary", use_container_width=True):
         for job in job_results:
             desc = clean_html(job.get("job_description", ""))
             skills = extract_skills(desc)
+            
+            # Also search for custom skills in the description
+            if custom_skills:
+                found_custom_skills = extract_custom_skills(desc, custom_skills)
+                skills.extend(found_custom_skills)
+                # Remove duplicates while preserving order
+                skills = list(dict.fromkeys(skills))
+            
             title = job.get("job_title", "")
             seniority = detect_seniority(title, desc)
             apply_link = get_best_apply_link(job)
@@ -414,20 +564,45 @@ if st.sidebar.button("Search Jobs", type="primary", use_container_width=True):
         for skills in df["skills_detected"]:
             all_skills_flat.extend(skills if isinstance(skills, list) else [])
         
+        # Dynamic skill clustering using embeddings
+        unique_skills = sorted(list(set(all_skills_flat)))
+        skill_clusters = cluster_skills_dynamic(unique_skills, max_clusters=8)
+        
+        # Ensure all skills have a level (default to "Expert" if not set)
+        complete_skill_levels = {}
+        for skill in all_user_skills:
+            # Get from skill_levels dict or from session state or default to "Expert"
+            session_key = f"skill_level_{skill}"
+            if skill in skill_levels:
+                complete_skill_levels[skill] = skill_levels[skill]
+            elif session_key in st.session_state:
+                complete_skill_levels[skill] = st.session_state[session_key]
+            else:
+                complete_skill_levels[skill] = "Expert"
+                st.session_state[session_key] = "Expert"
+        
         # Store in session state for tabs
         st.session_state.df = df
         st.session_state.all_user_skills = all_user_skills
-        st.session_state.skill_levels = skill_levels
+        st.session_state.skill_levels = complete_skill_levels
         st.session_state.missing = missing
         st.session_state.all_skills_flat = all_skills_flat
+        st.session_state.skill_clusters = skill_clusters
 
 # Check if we have data to display
 if 'df' in st.session_state and not st.session_state.df.empty:
     df = st.session_state.df
     all_user_skills = st.session_state.all_user_skills
-    skill_levels = st.session_state.skill_levels
+    skill_levels = st.session_state.skill_levels.copy() if st.session_state.skill_levels else {}
     missing = st.session_state.missing
     all_skills_flat = st.session_state.all_skills_flat
+    skill_clusters = st.session_state.get('skill_clusters', {})
+    
+    # Show skill levels UI even after searching (so users can adjust)
+    if all_user_skills:
+        skill_levels = render_skill_levels_ui(all_user_skills, skill_levels, key_suffix="_post")
+        # Update session state with current skill levels
+        st.session_state.skill_levels = skill_levels
     
     st.sidebar.divider()
     st.sidebar.header("Advanced Analysis")
@@ -455,10 +630,44 @@ if 'df' in st.session_state and not st.session_state.df.empty:
             st.metric("High Match Jobs (≥50%)", high_match)
         with col4:
             user_skills_count = len(all_user_skills) if all_user_skills else 0
-            avg_level = sum(skill_levels.values()) / len(skill_levels) if skill_levels else 0
-            level_label = ["Beginner", "Intermediate", "Advanced", "Expert"][int(avg_level) - 1] if avg_level > 0 else "N/A"
-            st.metric("Your Skills", f"{user_skills_count}", delta=level_label)
-        
+            st.metric("Your Skills", f"{user_skills_count}")
+
+        # Highlight the single best match as a prominent card
+        if not df.empty:
+            top_job = df.iloc[0]
+            best_match_value = top_job.get(
+                "weighted_match_ratio", top_job.get("match_ratio", None)
+            )
+            if isinstance(best_match_value, (int, float, float)):
+                best_match_pct = f"{best_match_value:.0%}"
+            else:
+                best_match_pct = "N/A"
+
+            apply_link = top_job.get("apply_link")
+            apply_html = ""
+            if apply_link:
+                apply_html = (
+                    f'<a href="{apply_link}" target="_blank" '
+                    f'style="display:inline-block;margin-top:0.5rem;'
+                    f'padding:8px 16px;border-radius:6px;border:2px solid #b8e994;'
+                    f'background:linear-gradient(135deg,#0f3460 0%,#16213e 100%);'
+                    f'color:#ffffff;text-decoration:none;font-weight:700;'
+                    f'text-transform:uppercase;letter-spacing:0.05em;font-size:0.8rem;">'
+                    f'View & Apply</a>'
+                )
+
+            st.markdown(
+                f"""
+                <div class="recommendation-card">
+                    <h4>Top Match for You</h4>
+                    <p><strong>Role:</strong> {top_job.get('title', 'N/A')} at {top_job.get('company', 'N/A')}</p>
+                    <p><strong>Location:</strong> {top_job.get('city', 'N/A')} &nbsp;|&nbsp; <strong>Match:</strong> {best_match_pct}</p>
+                    {apply_html}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
         st.divider()
         
         # Quick stats
@@ -534,7 +743,7 @@ if 'df' in st.session_state and not st.session_state.df.empty:
     
     with tab2:
         st.header("Skills Analysis")
-        
+
         if all_skills_flat:
             # Most demanded skills
             st.subheader("Most Demanded Skills")
@@ -547,6 +756,16 @@ if 'df' in st.session_state and not st.session_state.df.empty:
                 }
                 for skill, count in skill_freq.most_common(15)
             ])
+
+            # Short textual summary of coverage vs market demand
+            covered_skills = skill_df[skill_df["you_have"] == "Yes"]["skill"].nunique()
+            demanded_skills = skill_df["skill"].nunique()
+            missing_skills = demanded_skills - covered_skills
+
+            st.markdown(
+                f"**You currently cover {covered_skills} / {demanded_skills} of the top market skills** "
+                f"shown below. You're missing **{missing_skills} skills** that appear frequently in job offers."
+            )
             
             fig = px.bar(
                 skill_df,
@@ -567,64 +786,152 @@ if 'df' in st.session_state and not st.session_state.df.empty:
                 title_font=dict(color="#b8e994", size=18)
             )
             st.plotly_chart(fig, use_container_width=True)
-            
-            # Radar chart
-            st.subheader("Your Profile vs Ideal Profile")
+
+            # Simple radar chart: Your profile vs Market demand (top skills)
             if all_user_skills:
-                ideal_skills = [skill for skill, _ in skill_freq.most_common(10)]
-                comparison_skills = list(set(list(all_user_skills) + ideal_skills))[:10]
+                st.subheader("Your Profile vs Market Demand (Top Skills)")
+                top_skills = [skill for skill, _ in skill_freq.most_common(8)]
+                max_freq = max(skill_freq.values()) if skill_freq else 1
+
+                market_values = [skill_freq[skill] / max_freq for skill in top_skills]
                 
-                if comparison_skills:
-                    if skill_levels:
-                        user_values = [skill_levels.get(skill, 0) / 4.0 if skill in all_user_skills else 0 
-                                      for skill in comparison_skills]
+                # Map skill levels to numeric values for visualization
+                level_to_value = {
+                    "Basic": 0.25,
+                    "Intermediate": 0.5,
+                    "Advanced": 0.75,
+                    "Expert": 1.0
+                }
+                
+                # Use skill level if set, otherwise default to Expert (1.0)
+                user_values = []
+                for skill in top_skills:
+                    if skill in all_user_skills:
+                        skill_level = skill_levels.get(skill, "Expert")
+                        user_values.append(level_to_value.get(skill_level, 1.0))
                     else:
-                        user_values = [1 if skill in all_user_skills else 0 for skill in comparison_skills]
-                    
-                    ideal_values = []
-                    max_freq = max(skill_freq.values()) if skill_freq else 1
-                    for skill in comparison_skills:
-                        freq = skill_freq.get(skill, 0)
-                        ideal_values.append(freq / max_freq if max_freq > 0 else 0)
-                    
-                    fig_radar = go.Figure()
-                    fig_radar.add_trace(go.Scatterpolar(
-                        r=user_values,
-                        theta=comparison_skills,
-                        fill='toself',
-                        name='Your Profile',
-                        line_color='#b8e994',
-                        fillcolor='rgba(184, 233, 148, 0.3)'
-                    ))
-                    fig_radar.add_trace(go.Scatterpolar(
-                        r=ideal_values,
-                        theta=comparison_skills,
-                        fill='toself',
-                        name='Ideal Profile (Market Demand)',
-                        line_color='#ffffff',
-                        fillcolor='rgba(255, 255, 255, 0.2)'
-                    ))
-                    fig_radar.update_layout(
-                        polar=dict(
-                            radialaxis=dict(visible=True, range=[0, 1], gridcolor="#3a3a4e"),
-                            bgcolor="rgba(0,0,0,0)"
+                        user_values.append(0.0)
+
+                # Close the loop for polar plot
+                market_values_loop = market_values + [market_values[0]]
+                user_values_loop = user_values + [user_values[0]]
+                skills_loop = top_skills + [top_skills[0]]
+
+                fig_radar = go.Figure()
+                fig_radar.add_trace(go.Scatterpolar(
+                    r=user_values_loop,
+                    theta=skills_loop,
+                    fill="toself",
+                    name="You",
+                    line_color="#b8e994",
+                    fillcolor="rgba(184, 233, 148, 0.3)",
+                ))
+                fig_radar.add_trace(go.Scatterpolar(
+                    r=market_values_loop,
+                    theta=skills_loop,
+                    fill="toself",
+                    name="Market",
+                    line_color="#ffffff",
+                    fillcolor="rgba(255, 255, 255, 0.15)",
+                ))
+                fig_radar.update_layout(
+                    polar=dict(
+                        radialaxis=dict(
+                            visible=True,
+                            range=[0, 1],
+                            gridcolor="#3a3a4e",
                         ),
-                        showlegend=True,
-                        title="Skill Profile Comparison",
-                        height=500,
+                        bgcolor="rgba(0,0,0,0)",
+                    ),
+                    showlegend=True,
+                    height=450,
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#e0e0e0"),
+                    title_font=dict(color="#b8e994", size=18),
+                    legend=dict(font=dict(color="#e0e0e0")),
+                )
+                st.plotly_chart(fig_radar, use_container_width=True)
+
+            # Dynamic Skill Clusters
+            if 'skill_clusters' in st.session_state and st.session_state.skill_clusters:
+                st.subheader("Dynamic Skill Clusters")
+                st.caption("Skills grouped by semantic similarity using embeddings. Each cluster represents skills that are contextually related.")
+                
+                skill_clusters = st.session_state.skill_clusters
+                
+                # Group skills by cluster
+                cluster_groups = {}
+                for skill, cluster_id in skill_clusters.items():
+                    if cluster_id not in cluster_groups:
+                        cluster_groups[cluster_id] = []
+                    cluster_groups[cluster_id].append(skill)
+                
+                # Display clusters
+                num_clusters = len(cluster_groups)
+                cols = st.columns(min(3, num_clusters))
+                
+                for idx, (cluster_id, skills) in enumerate(sorted(cluster_groups.items())):
+                    with cols[idx % len(cols)]:
+                        st.markdown(f"""
+                        <div class="recommendation-card">
+                            <h4>Cluster {cluster_id}</h4>
+                            <p>{', '.join(skills[:8])}{'...' if len(skills) > 8 else ''}</p>
+                            <p><em>{len(skills)} skills</em></p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                
+                # Create a visualization of skill clusters
+                if len(cluster_groups) > 1:
+                    cluster_data = []
+                    for cluster_id, skills in sorted(cluster_groups.items()):
+                        for skill in skills:
+                            skill_freq = Counter(all_skills_flat)
+                            cluster_data.append({
+                                "skill": skill,
+                                "cluster": f"Cluster {cluster_id}",
+                                "frequency": skill_freq.get(skill, 0),
+                                "you_have": "Yes" if skill in all_user_skills else "No"
+                            })
+                    
+                    cluster_df = pd.DataFrame(cluster_data)
+                    
+                    # Bar chart showing skills by cluster
+                    fig_clusters = px.bar(
+                        cluster_df,
+                        x="cluster",
+                        y="frequency",
+                        color="you_have",
+                        title="Skill Distribution by Cluster",
+                        labels={"frequency": "Total Frequency", "cluster": "Cluster"},
+                        color_discrete_map={"Yes": "#b8e994", "No": "#e74c3c"}
+                    )
+                    fig_clusters.update_layout(
+                        height=400,
                         plot_bgcolor="rgba(0,0,0,0)",
                         paper_bgcolor="rgba(0,0,0,0)",
                         font=dict(color="#e0e0e0"),
-                        title_font=dict(color="#b8e994", size=18),
-                        legend=dict(font=dict(color="#e0e0e0"))
+                        title_font=dict(color="#b8e994", size=18)
                     )
-                    st.plotly_chart(fig_radar, use_container_width=True)
+                    st.plotly_chart(fig_clusters, use_container_width=True)
             
             # Missing skills
             st.subheader("Top Missing Skills")
             if missing:
                 missing_df = pd.DataFrame(missing).head(10)
                 missing_df["priority"] = missing_df["priority"].astype(int)
+
+                # Make skills clickable to quickly search for learning resources
+                st.caption("Click a skill name to search for courses and learning resources.")
+                for _, row in missing_df.iterrows():
+                    skill_name = row["skill"]
+                    priority = int(row["priority"])
+                    count = row["count"]
+                    search_url = f"https://www.google.com/search?q={skill_name.replace(' ', '+')}+course"
+                    st.markdown(
+                        f"- [{skill_name}]({search_url}) — "
+                        f"demand in jobs: **{count}**, priority: **{priority}**"
+                    )
                 
                 fig_missing = px.bar(
                     missing_df,
@@ -651,11 +958,27 @@ if 'df' in st.session_state and not st.session_state.df.empty:
     with tab3:
         st.header("Job Matches")
         
-        # Format skills_detected for display
+        # Initialize pagination state
+        if 'job_matches_page' not in st.session_state:
+            st.session_state.job_matches_page = 1
+        
+        # Format skills_detected for display (truncate if too long for better performance with 100+ jobs)
         display_df = df.copy()
-        display_df["skills_detected"] = display_df["skills_detected"].apply(
-            lambda x: ", ".join(x) if isinstance(x, list) else str(x)
-        )
+        
+        def format_skills_list(skills, max_length=150):
+            """Format skills list, truncating if too long"""
+            if isinstance(skills, list):
+                skills_str = ", ".join(skills)
+            else:
+                skills_str = str(skills)
+            
+            if len(skills_str) > max_length:
+                # Truncate and add ellipsis
+                truncated = skills_str[:max_length].rsplit(',', 1)[0] + "..."
+                return truncated
+            return skills_str
+        
+        display_df["skills_detected"] = display_df["skills_detected"].apply(format_skills_list)
         display_df["match_ratio"] = display_df["match_ratio"].apply(lambda x: f"{x:.1%}")
         
         # Select relevant columns for display (excluding apply_link, will add as button)
@@ -670,7 +993,53 @@ if 'df' in st.session_state and not st.session_state.df.empty:
         # Format weighted_match_ratio for display
         if "weighted_match_ratio" in display_df_display.columns:
             display_df_display["weighted_match_ratio"] = display_df_display["weighted_match_ratio"].apply(lambda x: f"{x:.1%}")
-            display_df_display = display_df_display.rename(columns={"weighted_match_ratio": "weighted_match"})
+        
+        # Column name mapping to English (more descriptive)
+        column_mapping = {
+            "title": "Job Title",
+            "company": "Company",
+            "city": "City",
+            "seniority": "Seniority",
+            "match_ratio": "Match Ratio",
+            "weighted_match_ratio": "Weighted Match Ratio",
+            "n_skills_user_has": "Skills You Have",
+            "n_skills_job": "Skills Required",
+            "skills_detected": "Skills Detected"
+        }
+        
+        # Rename columns
+        display_df_display = display_df_display.rename(columns=column_mapping)
+        
+        # Pagination settings
+        rows_per_page = 10
+        total_rows = len(display_df_display)
+        total_pages = max(1, (total_rows + rows_per_page - 1) // rows_per_page)
+        
+        # Display pagination info and controls
+        col_info, col_page = st.columns([2, 2])
+        
+        with col_info:
+            st.caption(f"Showing {total_rows} jobs in total")
+        
+        with col_page:
+            page_input = st.number_input(
+                "Page",
+                min_value=1,
+                max_value=total_pages,
+                value=st.session_state.job_matches_page,
+                key="page_input_job_matches",
+                label_visibility="collapsed"
+            )
+            if page_input != st.session_state.job_matches_page:
+                st.session_state.job_matches_page = page_input
+                st.rerun()
+            st.caption(f"Page {st.session_state.job_matches_page} of {total_pages}")
+        
+        # Calculate pagination slice
+        start_idx = (st.session_state.job_matches_page - 1) * rows_per_page
+        end_idx = min(start_idx + rows_per_page, total_rows)
+        paginated_df = display_df_display.iloc[start_idx:end_idx]
+        paginated_original_df = display_df.iloc[start_idx:end_idx]
         
         # Add CSS for button styling
         st.markdown("""
@@ -695,6 +1064,14 @@ if 'df' in st.session_state and not st.session_state.df.empty:
             transform: translateY(-2px);
             box-shadow: 0 4px 12px rgba(184, 233, 148, 0.4);
         }
+        .job-table {
+            font-size: 0.9rem;
+        }
+        .job-table td {
+            max-width: 200px;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
         </style>
         """, unsafe_allow_html=True)
         
@@ -702,27 +1079,31 @@ if 'df' in st.session_state and not st.session_state.df.empty:
         html_parts = []
         html_parts.append("""
         <div style="overflow-x: auto;">
-        <table style="width: 100%; border-collapse: collapse; background-color: #2a2a3e; color: #ffffff; margin: 1rem 0;">
+        <table class="job-table" style="width: 100%; border-collapse: collapse; background-color: #2a2a3e; color: #ffffff; margin: 1rem 0;">
         <thead>
             <tr style="background-color: #1a1a2e; color: #b8e994;">
         """)
         
         # Add headers
-        headers = list(display_df_display.columns) + ["Apply"]
+        headers = list(paginated_df.columns) + ["Apply"]
         for header in headers:
             html_parts.append(f'<th style="padding: 12px; text-align: left; font-weight: 700; border-bottom: 2px solid #3a3a4e;">{header}</th>')
         
         html_parts.append("</tr></thead><tbody>")
         
         # Add rows
-        for idx, row in display_df_display.iterrows():
+        for i, (display_idx, row) in enumerate(paginated_df.iterrows()):
+            # Get the original index from the original dataframe
+            original_idx = paginated_original_df.index[i]
             html_parts.append('<tr style="border-bottom: 1px solid #3a3a4e;">')
-            for col in display_df_display.columns:
+            for col in paginated_df.columns:
                 value = str(row[col]) if pd.notna(row[col]) else ""
+                # Escape HTML to prevent XSS
+                value = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 html_parts.append(f'<td style="padding: 12px;">{value}</td>')
             
-            # Add Apply button
-            apply_link = display_df.loc[idx, "apply_link"] if "apply_link" in display_df.columns else None
+            # Add Apply button - get from original display_df using the original index
+            apply_link = display_df.loc[original_idx, "apply_link"] if "apply_link" in display_df.columns else None
             if pd.notna(apply_link) and apply_link:
                 button_html = f'<a href="{apply_link}" target="_blank" class="apply-button-link">Apply</a>'
             else:
@@ -734,6 +1115,10 @@ if 'df' in st.session_state and not st.session_state.df.empty:
         
         # Render the table
         st.markdown("".join(html_parts), unsafe_allow_html=True)
+        
+        # Show pagination info at bottom
+        if total_pages > 1:
+            st.caption(f"Showing jobs {start_idx + 1} to {end_idx} of {total_rows}")
         
         # Clustering analysis
         if "cluster" in df.columns and df["cluster"].nunique() > 1:
@@ -862,7 +1247,7 @@ if 'df' in st.session_state and not st.session_state.df.empty:
     with tab5:
         if enable_graph_analysis:
             st.header("Skill Network Analysis")
-            
+            st.caption("⭐ indicates skills that you have (in tables, lists, labels and the network graph).")
             try:
                 G = build_skill_cooccurrence_graph(df)
                 
@@ -915,10 +1300,14 @@ if 'df' in st.session_state and not st.session_state.df.empty:
                     
                     with col1:
                         st.subheader("Top Skills by Importance Score")
-                        st.caption("Combines frequency, centrality, and network position")
+                        st.caption("Combines frequency, centrality, and network position. ⭐ marks skills you have.")
                         if not importance_df.empty:
                             top_importance = importance_df[["skill", "importance_score", "frequency", "degree", "betweenness"]].head(15)
                             top_importance.columns = ["Skill", "Importance", "Frequency", "Degree", "Betweenness"]
+                            # Highlight user's skills with a star icon
+                            top_importance["Skill"] = top_importance["Skill"].apply(
+                                lambda s: f"⭐ {s}" if s in all_user_skills else s
+                            )
                             top_importance["Importance"] = top_importance["Importance"].apply(lambda x: f"{x:.3f}")
                             top_importance["Degree"] = top_importance["Degree"].apply(lambda x: f"{x:.3f}")
                             top_importance["Betweenness"] = top_importance["Betweenness"].apply(lambda x: f"{x:.3f}")
@@ -928,12 +1317,15 @@ if 'df' in st.session_state and not st.session_state.df.empty:
                     
                     with col2:
                         st.subheader("Bridge Skills")
-                        st.caption("Skills that connect different communities (high betweenness)")
+                        st.caption("Skills that connect different communities (high betweenness). ⭐ marks skills you have.")
                         if bridge_skills_list:
                             bridge_df = pd.DataFrame({
                                 "Skill": bridge_skills_list,
                                 "Rank": range(1, len(bridge_skills_list) + 1)
                             })
+                            bridge_df["Skill"] = bridge_df["Skill"].apply(
+                                lambda s: f"⭐ {s}" if s in all_user_skills else s
+                            )
                             st.dataframe(bridge_df, use_container_width=True, hide_index=True)
                         else:
                             st.info("No bridge skills detected")
@@ -941,9 +1333,9 @@ if 'df' in st.session_state and not st.session_state.df.empty:
                     st.divider()
                     
                     st.subheader("Skill Co-occurrence Heatmap")
-                    st.caption("Shows which skills frequently appear together (top 20 skills)")
+                    st.caption("Shows which skills frequently appear together (top 10 skills). ⭐ marks skills you have.")
                     if len(G.nodes()) > 0:
-                        top_skills_for_heatmap = importance_df["skill"].head(20).tolist() if not importance_df.empty else centrality_df["node"].head(20).tolist()
+                        top_skills_for_heatmap = importance_df["skill"].head(10).tolist() if not importance_df.empty else centrality_df["node"].head(20).tolist()
                         
                         if top_skills_for_heatmap and len(top_skills_for_heatmap) > 1:
                             cooccurrence_matrix = []
@@ -959,10 +1351,16 @@ if 'df' in st.session_state and not st.session_state.df.empty:
                                         row.append(0)
                                 cooccurrence_matrix.append(row)
                             
+                            x_labels = [
+                                f"⭐ {s}" if s in all_user_skills else s
+                                for s in top_skills_for_heatmap
+                            ]
+                            y_labels = x_labels
+
                             fig_cooc = go.Figure(data=go.Heatmap(
                                 z=cooccurrence_matrix,
-                                x=top_skills_for_heatmap,
-                                y=top_skills_for_heatmap,
+                                x=x_labels,
+                                y=y_labels,
                                 colorscale='Viridis',
                                 text=[[f"{val}" if val > 0 else "" for val in row] for row in cooccurrence_matrix],
                                 texttemplate="%{text}",
@@ -979,8 +1377,8 @@ if 'df' in st.session_state and not st.session_state.df.empty:
                                 paper_bgcolor="rgba(0,0,0,0)",
                                 font=dict(color="#e0e0e0"),
                                 title_font=dict(color="#b8e994", size=18),
-                                xaxis=dict(tickangle=-45, tickfont=dict(size=9)),
-                                yaxis=dict(tickfont=dict(size=9))
+                                xaxis=dict(tickangle=-45, tickfont=dict(size=12, color="#e0e0e0")),
+                                yaxis=dict(tickfont=dict(size=12, color="#e0e0e0"))
                             )
                             st.plotly_chart(fig_cooc, use_container_width=True)
                         else:
@@ -995,7 +1393,13 @@ if 'df' in st.session_state and not st.session_state.df.empty:
                             {
                                 "Community": f"Community {comm_id}",
                                 "Skills Count": count,
-                                "Top Skills": ", ".join([skill for skill, cid in communities.items() if cid == comm_id][:8])
+                                "Top Skills": ", ".join(
+                                    [
+                                        (f"⭐ {skill}" if skill in all_user_skills else skill)
+                                        for skill, cid in communities.items()
+                                        if cid == comm_id
+                                    ][:8]
+                                )
                             }
                             for comm_id, count in community_counts.most_common()
                         ])
@@ -1032,6 +1436,9 @@ if 'df' in st.session_state and not st.session_state.df.empty:
                             st.subheader("Top Skills by Centrality")
                             top_centrality = centrality_df[["node", "degree", "betweenness", "weighted_degree"]].head(10)
                             top_centrality.columns = ["Skill", "Degree", "Betweenness", "Weighted Degree"]
+                            top_centrality["Skill"] = top_centrality["Skill"].apply(
+                                lambda s: f"⭐ {s}" if s in all_user_skills else s
+                            )
                             top_centrality["Degree"] = top_centrality["Degree"].apply(lambda x: f"{x:.3f}")
                             top_centrality["Betweenness"] = top_centrality["Betweenness"].apply(lambda x: f"{x:.3f}")
                             st.dataframe(top_centrality, use_container_width=True, hide_index=True)
@@ -1039,7 +1446,52 @@ if 'df' in st.session_state and not st.session_state.df.empty:
                     if show_network_viz:
                         st.divider()
                         st.subheader("Interactive Network Graph")
-                        net = plot_skill_network(G, communities, bridge_skills_list[:10])
+                        st.caption("Showing top 20 skills by importance score. ⭐ marks skills you have.")
+                        
+                        # Get top 20 skills by importance score
+                        if not importance_df.empty:
+                            top_20_skills = importance_df["skill"].head(20).tolist()
+                        else:
+                            # Fallback to centrality if importance_df is empty
+                            top_20_skills = centrality_df["node"].head(20).tolist()
+                        
+                        # Create subgraph with only top 20 skills
+                        if top_20_skills and len(top_20_skills) > 0:
+                            # Create subgraph containing only top 20 skills and their connections
+                            G_subgraph = G.subgraph(top_20_skills).copy()
+                            
+                            # Filter communities to only include top 20 skills
+                            communities_subgraph = {
+                                skill: communities.get(skill, 0) 
+                                for skill in top_20_skills 
+                                if skill in communities
+                            }
+                            
+                            # Filter bridge skills to only those in top 20
+                            bridge_skills_subgraph = [
+                                skill for skill in bridge_skills_list[:10] 
+                                if skill in top_20_skills
+                            ]
+                            
+                            # Filter user skills to only those in top 20
+                            user_skills_subgraph = [
+                                skill for skill in all_user_skills 
+                                if skill in top_20_skills
+                            ]
+                            
+                            net = plot_skill_network(
+                                G_subgraph,
+                                communities_subgraph,
+                                highlight_skills=bridge_skills_subgraph,
+                                user_skills=user_skills_subgraph,
+                            )
+                        else:
+                            net = plot_skill_network(
+                                G,
+                                communities,
+                                highlight_skills=bridge_skills_list[:10],
+                                user_skills=all_user_skills,
+                            )
                         if net:
                             try:
                                 net.save_graph("network.html")
@@ -1051,17 +1503,6 @@ if 'df' in st.session_state and not st.session_state.df.empty:
                         else:
                             st.warning("Could not generate network visualization")
                     
-                    if all_user_skills:
-                        st.divider()
-                        st.subheader("Network-Based Skill Recommendations")
-                        recommendations = get_skill_recommendations(G, all_user_skills, top_n=10)
-                        if not recommendations.empty:
-                            recommendations.columns = ["Recommended Skill", "Score", "Reason"]
-                            recommendations["Score"] = recommendations["Score"].apply(lambda x: f"{x:.3f}")
-                            st.dataframe(recommendations, use_container_width=True, hide_index=True)
-                        else:
-                            st.info("No recommendations available based on network analysis")
-                
                 else:
                     st.info("Not enough skills data for network analysis")
                     
@@ -1072,30 +1513,52 @@ if 'df' in st.session_state and not st.session_state.df.empty:
             st.info("💡 Enable 'Graph Analysis' in the sidebar to see skill network insights and visualizations.")
 
 else:
-    # Welcome screen
-    st.info("**Get started:** Fill in the search parameters in the sidebar and click 'Search Jobs' to begin your skill gap analysis.")
-    
-    # Show example
-    st.markdown("### How it works:")
+    # Welcome screen - more visual and guided
+    st.markdown("### Welcome to SkillGap")
+    st.markdown(
+        "Discover how well you match real job offers, what skills you're missing, "
+        "and how to prioritize your upskilling roadmap."
+    )
+
     col1, col2, col3 = st.columns(3)
+
     with col1:
-        st.markdown("""
-        **1. Search Jobs**
-        - Enter your target role
-        - Set location and filters
-        - Click Search
-        """)
+        st.markdown(
+            """
+            <div class="recommendation-card">
+                <h4>1. Search Jobs</h4>
+                <p>Pick a <strong>role</strong>, <strong>location</strong>, country and search radius in the sidebar.</p>
+                <p>Optionally, start from an <strong>example scenario</strong> to see instant results.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     with col2:
-        st.markdown("""
-        **2. Add Your Skills**
-        - Select from the list
-        - Add custom skills
-        - Set proficiency levels
-        """)
+        st.markdown(
+            """
+            <div class="recommendation-card">
+                <h4>2. Add Your Skills</h4>
+                <p>Select the skills that best describe you from the list in the sidebar.</p>
+                <p>You can also type <strong>custom skills</strong> or upload your <strong>CV (PDF)</strong> to detect skills automatically.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     with col3:
-        st.markdown("""
-        **3. Analyze & Improve**
-        - View skill gaps
-        - Get recommendations
-        - Track your progress
-        """)
+        st.markdown(
+            """
+            <div class="recommendation-card">
+                <h4>3. Analyze & Improve</h4>
+                <p>Explore the tabs to see your <strong>skill gap</strong>, best matching jobs, and a learning roadmap.</p>
+                <p>Enable <strong>Graph Analysis</strong> for network insights on skills.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        "**Get started:** choose a role and location in the sidebar, "
+        "optionally load an example scenario, then click **Search Jobs**."
+    )
