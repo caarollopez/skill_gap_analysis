@@ -11,7 +11,7 @@ def compute_skill_gap(rows, user_skills, skill_levels=None):
     Args:
         rows: List of job dictionaries with 'skills_detected' key
         user_skills: Set or list of skills the user has
-        skill_levels: Dict mapping skill -> level (1-4: Beginner to Expert)
+        skill_levels: Dict mapping skill -> level (can be numeric 1-4 or string: "Basic", "Intermediate", "Advanced", "Expert")
     
     Returns:
         Tuple of (rows with match metrics, missing skills list)
@@ -19,8 +19,29 @@ def compute_skill_gap(rows, user_skills, skill_levels=None):
     user_skills = set(user_skills) if user_skills else set()
     skill_levels = skill_levels or {}
     
-    # Default level is 2 (Intermediate) if skill is present but no level specified
-    default_level = 2
+    # Map string level names to numeric values (for backward compatibility with numeric 1-4)
+    level_name_to_numeric = {
+        "Basic": 1,
+        "Intermediate": 2,
+        "Advanced": 3,
+        "Expert": 4
+    }
+    
+    def get_numeric_level(skill):
+        """Convert skill level to numeric (1-4). Handles both string and numeric inputs."""
+        level = skill_levels.get(skill, None)
+        if level is None:
+            return 4  # Default to Expert (4) if not specified
+        # If it's already a number (1-4), return it
+        if isinstance(level, (int, float)):
+            return int(level)
+        # If it's a string, convert using mapping
+        if isinstance(level, str):
+            return level_name_to_numeric.get(level, 4)  # Default to Expert if unknown string
+        return 4  # Fallback to Expert
+    
+    # Default numeric level is 4 (Expert) if skill is present but no level specified
+    default_numeric_level = 4
 
     for row in rows:
         job_sk = set(row["skills_detected"])
@@ -37,8 +58,8 @@ def compute_skill_gap(rows, user_skills, skill_levels=None):
         for skill in job_sk:
             if skill in user_skills:
                 # User has the skill - weight by level (1-4, normalized to 0.25-1.0)
-                user_level = skill_levels.get(skill, default_level)
-                weight = user_level / 4.0  # Normalize to 0.25-1.0
+                user_level_numeric = get_numeric_level(skill)
+                weight = user_level_numeric / 4.0  # Normalize to 0.25-1.0
                 weighted_match += weight
                 total_weight += 1.0
             else:
@@ -56,8 +77,8 @@ def compute_skill_gap(rows, user_skills, skill_levels=None):
             weighted_match / total_weight if total_weight > 0 else 0
         )
         
-        # Average level of matched skills
-        matched_levels = [skill_levels.get(skill, default_level) 
+        # Average level of matched skills (numeric 1-4)
+        matched_levels = [get_numeric_level(skill) 
                          for skill in job_sk if skill in user_skills]
         row["avg_skill_level"] = (
             sum(matched_levels) / len(matched_levels) 

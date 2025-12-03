@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import networkx as nx
 
 try:
     import PyPDF2
@@ -31,6 +32,49 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def render_skill_levels_ui(all_user_skills, skill_levels, key_suffix=""):
+    """
+    Render the skill levels UI in the sidebar.
+    
+    Args:
+        all_user_skills: List of user skills
+        skill_levels: Dictionary to store skill levels
+        key_suffix: Optional suffix to add to widget keys for uniqueness
+    """
+    if not all_user_skills:
+        return skill_levels
+    
+    st.sidebar.divider()
+    st.sidebar.subheader("Skill Levels (Optional)")
+    st.sidebar.caption("Set your proficiency level for each skill. Default: Expert if not specified.")
+    
+    # Level options
+    level_options = ["Basic", "Intermediate", "Advanced", "Expert"]
+    
+    # Use expander to keep sidebar clean
+    with st.sidebar.expander("Set Skill Levels", expanded=False):
+        for skill in all_user_skills:
+            # Session state key (shared across renders)
+            session_key = f"skill_level_{skill}"
+            # Widget key (unique per render location)
+            widget_key = f"skill_level_{skill}{key_suffix}"
+            
+            if session_key not in st.session_state:
+                st.session_state[session_key] = "Expert"
+            
+            selected_level = st.selectbox(
+                f"{skill}",
+                options=level_options,
+                index=level_options.index(st.session_state[session_key]),
+                key=widget_key,
+                help=f"Select your proficiency level for {skill}"
+            )
+            # Update session state
+            st.session_state[session_key] = selected_level
+            skill_levels[skill] = selected_level
+    
+    return skill_levels
 
 # Page config with modern styling
 st.set_page_config(
@@ -385,8 +429,11 @@ if not all_user_skills:
         "show personalized recommendations."
     )
 
-# Skill levels are currently not used in the analysis; keep an empty dict for compatibility
+# Skill levels selection (optional) - only show if no search results yet
 skill_levels = {}
+# Only show skill level UI before search if we don't have results yet
+if all_user_skills and 'df' not in st.session_state:
+    skill_levels = render_skill_levels_ui(all_user_skills, skill_levels, key_suffix="_pre")
 
 if st.sidebar.button("Search Jobs", type="primary", use_container_width=True):
     # Basic validation to avoid confusing empty searches
@@ -506,10 +553,23 @@ if st.sidebar.button("Search Jobs", type="primary", use_container_width=True):
         for skills in df["skills_detected"]:
             all_skills_flat.extend(skills if isinstance(skills, list) else [])
         
+        # Ensure all skills have a level (default to "Expert" if not set)
+        complete_skill_levels = {}
+        for skill in all_user_skills:
+            # Get from skill_levels dict or from session state or default to "Expert"
+            session_key = f"skill_level_{skill}"
+            if skill in skill_levels:
+                complete_skill_levels[skill] = skill_levels[skill]
+            elif session_key in st.session_state:
+                complete_skill_levels[skill] = st.session_state[session_key]
+            else:
+                complete_skill_levels[skill] = "Expert"
+                st.session_state[session_key] = "Expert"
+        
         # Store in session state for tabs
         st.session_state.df = df
         st.session_state.all_user_skills = all_user_skills
-        st.session_state.skill_levels = skill_levels
+        st.session_state.skill_levels = complete_skill_levels
         st.session_state.missing = missing
         st.session_state.all_skills_flat = all_skills_flat
 
@@ -517,9 +577,15 @@ if st.sidebar.button("Search Jobs", type="primary", use_container_width=True):
 if 'df' in st.session_state and not st.session_state.df.empty:
     df = st.session_state.df
     all_user_skills = st.session_state.all_user_skills
-    skill_levels = st.session_state.skill_levels
+    skill_levels = st.session_state.skill_levels.copy() if st.session_state.skill_levels else {}
     missing = st.session_state.missing
     all_skills_flat = st.session_state.all_skills_flat
+    
+    # Show skill levels UI even after searching (so users can adjust)
+    if all_user_skills:
+        skill_levels = render_skill_levels_ui(all_user_skills, skill_levels, key_suffix="_post")
+        # Update session state with current skill levels
+        st.session_state.skill_levels = skill_levels
     
     st.sidebar.divider()
     st.sidebar.header("Advanced Analysis")
@@ -711,7 +777,23 @@ if 'df' in st.session_state and not st.session_state.df.empty:
                 max_freq = max(skill_freq.values()) if skill_freq else 1
 
                 market_values = [skill_freq[skill] / max_freq for skill in top_skills]
-                user_values = [1.0 if skill in all_user_skills else 0.0 for skill in top_skills]
+                
+                # Map skill levels to numeric values for visualization
+                level_to_value = {
+                    "Basic": 0.25,
+                    "Intermediate": 0.5,
+                    "Advanced": 0.75,
+                    "Expert": 1.0
+                }
+                
+                # Use skill level if set, otherwise default to Expert (1.0)
+                user_values = []
+                for skill in top_skills:
+                    if skill in all_user_skills:
+                        skill_level = skill_levels.get(skill, "Expert")
+                        user_values.append(level_to_value.get(skill_level, 1.0))
+                    else:
+                        user_values.append(0.0)
 
                 # Close the loop for polar plot
                 market_values_loop = market_values + [market_values[0]]
@@ -1094,9 +1176,9 @@ if 'df' in st.session_state and not st.session_state.df.empty:
                     st.divider()
                     
                     st.subheader("Skill Co-occurrence Heatmap")
-                    st.caption("Shows which skills frequently appear together (top 20 skills). ⭐ marks skills you have.")
+                    st.caption("Shows which skills frequently appear together (top 10 skills). ⭐ marks skills you have.")
                     if len(G.nodes()) > 0:
-                        top_skills_for_heatmap = importance_df["skill"].head(20).tolist() if not importance_df.empty else centrality_df["node"].head(20).tolist()
+                        top_skills_for_heatmap = importance_df["skill"].head(10).tolist() if not importance_df.empty else centrality_df["node"].head(20).tolist()
                         
                         if top_skills_for_heatmap and len(top_skills_for_heatmap) > 1:
                             cooccurrence_matrix = []
@@ -1138,8 +1220,8 @@ if 'df' in st.session_state and not st.session_state.df.empty:
                                 paper_bgcolor="rgba(0,0,0,0)",
                                 font=dict(color="#e0e0e0"),
                                 title_font=dict(color="#b8e994", size=18),
-                                xaxis=dict(tickangle=-45, tickfont=dict(size=9)),
-                                yaxis=dict(tickfont=dict(size=9))
+                                xaxis=dict(tickangle=-45, tickfont=dict(size=12, color="#e0e0e0")),
+                                yaxis=dict(tickfont=dict(size=12, color="#e0e0e0"))
                             )
                             st.plotly_chart(fig_cooc, use_container_width=True)
                         else:
@@ -1207,12 +1289,52 @@ if 'df' in st.session_state and not st.session_state.df.empty:
                     if show_network_viz:
                         st.divider()
                         st.subheader("Interactive Network Graph")
-                        net = plot_skill_network(
-                            G,
-                            communities,
-                            highlight_skills=bridge_skills_list[:10],
-                            user_skills=all_user_skills,
-                        )
+                        st.caption("Showing top 20 skills by importance score. ⭐ marks skills you have.")
+                        
+                        # Get top 20 skills by importance score
+                        if not importance_df.empty:
+                            top_20_skills = importance_df["skill"].head(20).tolist()
+                        else:
+                            # Fallback to centrality if importance_df is empty
+                            top_20_skills = centrality_df["node"].head(20).tolist()
+                        
+                        # Create subgraph with only top 20 skills
+                        if top_20_skills and len(top_20_skills) > 0:
+                            # Create subgraph containing only top 20 skills and their connections
+                            G_subgraph = G.subgraph(top_20_skills).copy()
+                            
+                            # Filter communities to only include top 20 skills
+                            communities_subgraph = {
+                                skill: communities.get(skill, 0) 
+                                for skill in top_20_skills 
+                                if skill in communities
+                            }
+                            
+                            # Filter bridge skills to only those in top 20
+                            bridge_skills_subgraph = [
+                                skill for skill in bridge_skills_list[:10] 
+                                if skill in top_20_skills
+                            ]
+                            
+                            # Filter user skills to only those in top 20
+                            user_skills_subgraph = [
+                                skill for skill in all_user_skills 
+                                if skill in top_20_skills
+                            ]
+                            
+                            net = plot_skill_network(
+                                G_subgraph,
+                                communities_subgraph,
+                                highlight_skills=bridge_skills_subgraph,
+                                user_skills=user_skills_subgraph,
+                            )
+                        else:
+                            net = plot_skill_network(
+                                G,
+                                communities,
+                                highlight_skills=bridge_skills_list[:10],
+                                user_skills=all_user_skills,
+                            )
                         if net:
                             try:
                                 net.save_graph("network.html")
