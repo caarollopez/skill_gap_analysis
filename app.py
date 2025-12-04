@@ -552,10 +552,10 @@ if st.sidebar.button("Search Jobs", type="primary", use_container_width=True):
         
         # Apply clustering
         n_clusters = min(4, len(df))  # Max 4 clusters
-        if n_clusters > 1:
-            df = cluster_jobs(df, n_clusters=n_clusters)
-        else:
-            df["cluster"] = 0
+        # if n_clusters > 1:
+        #     df = cluster_jobs(df, n_clusters=n_clusters)
+        # else:
+        #     df["cluster"] = 0
         
         df = df.sort_values("match_ratio", ascending=False)
         
@@ -848,8 +848,8 @@ if 'df' in st.session_state and not st.session_state.df.empty:
                     plot_bgcolor="rgba(0,0,0,0)",
                     paper_bgcolor="rgba(0,0,0,0)",
                     font=dict(color="#e0e0e0"),
-                    title_font=dict(color="#b8e994", size=18),
                     legend=dict(font=dict(color="#e0e0e0")),
+                    title=dict(text="")   # <--- explicitly empty title (removes 'undefined')
                 )
                 st.plotly_chart(fig_radar, use_container_width=True)
 
@@ -983,8 +983,8 @@ if 'df' in st.session_state and not st.session_state.df.empty:
         
         # Select relevant columns for display (excluding apply_link, will add as button)
         cols_to_show = ["title", "company", "city", "seniority", "match_ratio"]
-        if "weighted_match_ratio" in display_df.columns:
-            cols_to_show.append("weighted_match_ratio")
+        # if "weighted_match_ratio" in display_df.columns:
+        #     cols_to_show.append("weighted_match_ratio")
         cols_to_show.extend(["n_skills_user_has", "n_skills_job", "skills_detected"])
         
         available_cols = [c for c in cols_to_show if c in display_df.columns]
@@ -1120,30 +1120,30 @@ if 'df' in st.session_state and not st.session_state.df.empty:
         if total_pages > 1:
             st.caption(f"Showing jobs {start_idx + 1} to {end_idx} of {total_rows}")
         
-        # Clustering analysis
-        if "cluster" in df.columns and df["cluster"].nunique() > 1:
-            st.subheader("Job Clusters")
-            cluster_summary = interpret_clusters(df)
+        # # Clustering analysis
+        # if "cluster" in df.columns and df["cluster"].nunique() > 1:
+        #     st.subheader("Job Clusters")
+        #     cluster_summary = interpret_clusters(df)
             
-            col1, col2 = st.columns(2)
-            with col1:
-                st.dataframe(cluster_summary, hide_index=True)
-            with col2:
-                cluster_counts = df["cluster"].value_counts().sort_index()
-                fig_cluster = px.pie(
-                    values=cluster_counts.values,
-                    names=[f"Cluster {i}" for i in cluster_counts.index],
-                    title="Job Distribution by Cluster",
-                    color_discrete_sequence=["#b8e994", "#667eea", "#764ba2", "#fbbf24"]
-                )
-                fig_cluster.update_layout(
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    font=dict(color="#e0e0e0"),
-                    title_font=dict(color="#b8e994", size=18),
-                    legend=dict(font=dict(color="#e0e0e0"))
-                )
-                st.plotly_chart(fig_cluster, use_container_width=True)
+        #     col1, col2 = st.columns(2)
+        #     with col1:
+        #         st.dataframe(cluster_summary, hide_index=True)
+        #     with col2:
+        #         cluster_counts = df["cluster"].value_counts().sort_index()
+        #         fig_cluster = px.pie(
+        #             values=cluster_counts.values,
+        #             names=[f"Cluster {i}" for i in cluster_counts.index],
+        #             title="Job Distribution by Cluster",
+        #             color_discrete_sequence=["#b8e994", "#667eea", "#764ba2", "#fbbf24"]
+        #         )
+        #         fig_cluster.update_layout(
+        #             plot_bgcolor="rgba(0,0,0,0)",
+        #             paper_bgcolor="rgba(0,0,0,0)",
+        #             font=dict(color="#e0e0e0"),
+        #             title_font=dict(color="#b8e994", size=18),
+        #             legend=dict(font=dict(color="#e0e0e0"))
+        #         )
+        #         st.plotly_chart(fig_cluster, use_container_width=True)
     
     with tab4:
         st.header("Personalized Recommendations")

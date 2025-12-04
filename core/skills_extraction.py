@@ -118,12 +118,11 @@ def extract_custom_skills(description, custom_skills):
         
         # Normalize the skill name for matching
         skill_normalized = normalize_token(skill)
-        skill_lower = skill.lower()
         
         # Check if skill appears in description (case-insensitive)
         # Use word boundaries to avoid partial matches
         # For example, "Python" should match "Python" but not "Pythonic"
-        pattern = r'\b' + re.escape(skill_lower) + r'\b'
+        pattern = r'\b' + re.escape(skill_normalized) + r'\b'
         if re.search(pattern, description_lower):
             found_custom_skills.append(skill)
     
