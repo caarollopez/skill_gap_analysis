@@ -14,7 +14,7 @@ except ImportError:  # pragma: no cover - handled at runtime in UI
 
 from core.api_client import load_or_fetch_jobs
 from core.skills_extraction import clean_html, extract_skills, extract_custom_skills, skills_list, detect_seniority, get_best_apply_link
-from core.analysis import compute_skill_gap, cluster_jobs, interpret_clusters, cluster_skills_dynamic
+from core.analysis import compute_skill_gap, cluster_skills_dynamic
 from core.graph_analysis import (
     build_skill_cooccurrence_graph,
     compute_centralities,
@@ -983,8 +983,8 @@ if 'df' in st.session_state and not st.session_state.df.empty:
         
         # Select relevant columns for display (excluding apply_link, will add as button)
         cols_to_show = ["title", "company", "city", "seniority", "match_ratio"]
-        # if "weighted_match_ratio" in display_df.columns:
-        #     cols_to_show.append("weighted_match_ratio")
+        if "weighted_match_ratio" in display_df.columns:
+            cols_to_show.append("weighted_match_ratio")
         cols_to_show.extend(["n_skills_user_has", "n_skills_job", "skills_detected"])
         
         available_cols = [c for c in cols_to_show if c in display_df.columns]
