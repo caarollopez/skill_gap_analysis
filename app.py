@@ -21,9 +21,7 @@ from core.graph_analysis import (
     detect_communities,
     find_bridge_skills,
     plot_skill_network,
-    get_skill_recommendations,
     get_skill_importance_scores,
-    get_skill_paths
 )
 
 # Setup logging
@@ -549,13 +547,6 @@ if st.sidebar.button("Search Jobs", type="primary", use_container_width=True):
         if len(df) == 0:
             st.warning("No jobs match the selected filters.")
             st.stop()
-        
-        # Apply clustering
-        n_clusters = min(4, len(df))  # Max 4 clusters
-        # if n_clusters > 1:
-        #     df = cluster_jobs(df, n_clusters=n_clusters)
-        # else:
-        #     df["cluster"] = 0
         
         df = df.sort_values("match_ratio", ascending=False)
         
@@ -1280,8 +1271,8 @@ if 'df' in st.session_state and not st.session_state.df.empty:
                     communities = detect_communities(G, algorithm=comm_algorithm, 
                                                     resolution=comm_resolution,
                                                     min_community_size=min_comm_size)
-                    bridge_skills_list = find_bridge_skills(G, top_n=10)
-                    importance_df = get_skill_importance_scores(df, all_user_skills)
+                    bridge_skills_list = find_bridge_skills(centrality_df, top_n=10)
+                    importance_df = get_skill_importance_scores(G, centrality_df, df, all_user_skills)
                     
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
