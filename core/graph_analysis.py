@@ -93,7 +93,7 @@ def compute_centralities(graph: nx.Graph) -> pd.DataFrame:
         except:
             closeness_cent = {node: 0.0 for node in graph.nodes()}
     
-    # Eigenvector centrality (only if graph has edges)
+    # Eigenvector centrality
     try:
         eigenvector_cent = nx.eigenvector_centrality(graph, weight="weight" if has_weights else None, max_iter=1000)
     except:
