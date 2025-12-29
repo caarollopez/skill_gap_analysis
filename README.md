@@ -1,11 +1,11 @@
 # Skill Gap Analysis
 **Authors**: Carolina Lopez de la Madriz, Emma Rodriguez Hervas, Álvaro Martin Ruiz & Iker Rosales Saiz
-![SkillGapLogo](assets/skill_gap_logo.jpeg)
+![SkillGapLogo](assets/skill_gap_video_portada.jpg)
 
 A career-analytics platform that identifies the gap between a candidate's current skill set and the requirements of their target roles.
 It retrieves job postings from external APIs (primary: **JSearch / OpenWebNinja**) and provides an interactive **Streamlit dashboard** for skill extraction, gap scoring, graph-based analytics, recommendations, reporting and **real job offers link**!.
 
-![SkillGapWelcomeImage](assets/welcome_screen.jpeg)
+![SkillGapWelcomeImage](assets/welcome_image.jpeg)
 
 ## 🚀 Try It Now
 
@@ -240,10 +240,27 @@ streamlit run app.py
 
 ## Authors
 
-* Carolina López De La Madriz
-* Emma Rodríguez Hervas
-* Álvaro Martín Ruiz
-* Iker Rosales Saiz
+<table>
+  <tr>
+    <td align="center">
+      <img src="https://github.com/carolinalopezdelamadriz.png" width="100px;" alt="Profile picture of Carolina López De La Madriz"/><br />
+      <b>Carolina López De La Madriz</b>
+    </td>
+    <td align="center">
+      <img src="https://github.com/emmarhv.png" width="100px;" alt="Profile picture of Emma Rodríguez Hervás"/><br />
+      <b>Emma Rodríguez Hervas</b>
+    </td>
+    <td align="center">
+      <img src="https://github.com/alvaromartinruiz.png" width="100px;" alt="Profile picture of Álvaro Martín Ruiz"/><br />
+      <b>Álvaro Martín Ruiz</b>
+    </td>
+    <td align="center">
+      <img src="https://github.com/ikerosales.png" width="100px;" alt="Profile picture of Iker Rosales Saiz"/><br />
+      <b>Iker Rosales Saiz</b>
+    </td>
+  </tr>
+</table>
+
 
 ## Acknowledgements
 
