@@ -232,3 +232,7 @@ Job APIs → NLP & Taxonomy → Skill Analytics → Graph & Clustering → Strea
 * Emma Rodríguez Hervas
 * Álvaro Martín Ruiz
 * Iker Rosales Saiz
+
+## Greatings
+Gratitude to **OpenWebNinja** (OpenWebSearch) for their API access, support, and willingness to empower community-driven job analytics.  
+This project would not have been possible without their generous API allowance and open spirit!
