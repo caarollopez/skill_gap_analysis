@@ -11,7 +11,7 @@ It retrieves job postings from external APIs (primary: **JSearch / OpenWebNinja*
 
 **Use SkillGap directly in your browser - no installation required!**
 
-👉 **[Access the Live Application](https://skill-gap.streamlit.app/)** 👈
+👉 **[Access the Live Application](https://skill-gap-analysis.streamlit.app/)** 👈
 
 Simply open the link above and start analyzing your skill gap right away. Enter your role, location, and skills to get personalized insights and job recommendations.
 
