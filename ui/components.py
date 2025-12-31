@@ -114,7 +114,7 @@ def render_footer():
 
     developers_html = ''
     for dev in developers:
-        developers_html += f'<div class="developer-card"> <span class="developer-name">{dev['name']}</span><div class="social-links"><a href="{dev['github']}" target="_blank" rel="noopener noreferrer" class="social-link" title="GitHub"><img src="data:image/png;base64,{github_image_data}" alt="GitHub" class="social-icon"/></a><a href="{dev['linkedin']}" target="_blank" rel="noopener noreferrer" class="social-link" title="LinkedIn"><img src="data:image/png;base64,{linkedin_image_data}" alt="LinkedIn" class="social-icon"/></a></div></div>'
+        developers_html += f"""<div class="developer-card"> <span class="developer-name">{dev['name']}</span><div class="social-links"><a href="{dev['github']}" target="_blank" rel="noopener noreferrer" class="social-link" title="GitHub"><img src="data:image/png;base64,{github_image_data}" alt="GitHub" class="social-icon"/></a><a href="{dev['linkedin']}" target="_blank" rel="noopener noreferrer" class="social-link" title="LinkedIn"><img src="data:image/png;base64,{linkedin_image_data}" alt="LinkedIn" class="social-icon"/></a></div></div>"""
     footer_html = f"""
     <div class="footer-container">
         <div class="footer-content">
